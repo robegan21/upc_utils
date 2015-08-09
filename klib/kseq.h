@@ -41,11 +41,14 @@
 	typedef struct __kstream_t {				\
 		unsigned char *buf;						\
 		int begin, end, is_eof;					\
+		size_t file_offset, file_size;			\
 		type_t f;								\
 	} kstream_t;
 
+
 #define ks_eof(ks) ((ks)->is_eof && (ks)->begin >= (ks)->end)
 #define ks_rewind(ks) ((ks)->is_eof = (ks)->begin = (ks)->end = 0)
+#define ks_tell(ks) ((ks)->file_offset - (ks)->end + (ks)->begin)
 
 #define __KS_BASIC(type_t, __bufsize)								\
 	static inline kstream_t *ks_init(type_t f)						\
@@ -70,6 +73,7 @@
 		if (ks->begin >= ks->end) {							\
 			ks->begin = 0;									\
 			ks->end = __read(ks->f, ks->buf, __bufsize);	\
+			ks->file_offset += ks->end;							\
 			if (ks->end == 0) { ks->is_eof = 1; return -1;}	\
 		}													\
 		return (int)ks->buf[ks->begin++];					\
@@ -81,6 +85,11 @@ typedef struct __kstring_t {
 	size_t l, m;
 	char *s;
 } kstring_t;
+static void __kstring_swap(kstring_t *a, kstring_t *b) {
+	kstring_t tmp = *a;
+	*a = *b;
+	*b = tmp;
+}
 #endif
 
 #ifndef kroundup32
@@ -99,6 +108,7 @@ typedef struct __kstring_t {
 				if (!ks->is_eof) {										\
 					ks->begin = 0;										\
 					ks->end = __read(ks->f, ks->buf, __bufsize);		\
+					ks->file_offset += ks->end;							\
 					if (ks->end == 0) { ks->is_eof = 1; break; }		\
 				} else break;											\
 			}															\
@@ -210,6 +220,103 @@ typedef struct __kstring_t {
 		return seq->seq.l; \
 	}
 
+
+#define __KSEQ_INIT_SEEK(SCOPE, __seek) \
+	SCOPE int kseq_isseq(char *str, int len) \
+	{ /* returns true if the set of characters could be a fasta sequence */ \
+		int i; \
+		char c; \
+		for(i = 0; i<len; i++) { \
+			c = str[i]; \
+			if ( !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '.' || c == '-' || c == '*' ) ) \
+				return 0; \
+		} \
+		return 1; \
+	}\
+	SCOPE size_t kseq_nextRecordFasta(kseq_t *seq) \
+	{ /* find and seek to the next record after the last byte accessed */\
+		size_t offset = 0; \
+		int c; \
+		kstream_t *ks = seq->f; \
+		while ((c = ks_getc(ks)) != 1 && c != '>') offset++; \
+		if (c == -1) return -1; /* end of file */ \
+		seq->last_char = c; \
+		return offset; \
+	} \
+	SCOPE size_t kseq_nextRecordFastq(kseq_t *seq, size_t filepos) \
+	{ /* find and seek to the next record after the last byte accessed */ \
+		size_t offset = 0, recordLen = 0, maxLines = 8; \
+		int i, c; \
+		kstream_t *ks = seq->f; \
+		kstring_t lines[4];\
+		for(i = 0; i < 4; i++) { \
+			lines[i].l = lines[i].m = 0; \
+			lines[i].s = NULL; \
+			if (ks_getuntil(ks, KS_SEP_LINE, &lines[i], &c) < 0) { \
+				while (i) { free(lines[i--].s); } \
+				return -1; /* normal exit: EOF */ \
+			} \
+		} \
+		for(i = 0; i < maxLines; i++) { \
+			if (lines[0].l > 0 && lines[1].l > 0 && lines[2].l > 0 && lines[3].l > 0) { \
+				if (lines[0].s[0] == '@' && kseq_isseq(lines[1].s, lines[1].l) \
+					&& lines[2].s[0] == '+' && lines[1].l == lines[3].l) { \
+					recordLen = lines[0].l + lines[1].l + lines[2].l + lines[3].l + 4; \
+					if (ks->begin > recordLen) { \
+						ks->begin -= recordLen; \
+						seq->last_char = 0; \
+					} else { \
+						ks_rewind(ks); \
+						__seek(ks->f, filepos + offset, SEEK_SET); \
+						ks->file_offset = filepos + offset; \
+					} \
+					break; /* found the record start */ \
+				} \
+			} \
+			offset += lines[0].l + 1; \
+			__kstring_swap(lines+0, lines+1); \
+			__kstring_swap(lines+1, lines+2); \
+			__kstring_swap(lines+2, lines+3); \
+			if (ks_getuntil(ks, KS_SEP_LINE, &lines[3], &c) < 0) { /* eof */ offset = -1; break; } \
+		} \
+		for(c = 0; c < 4; c++) free(lines[c].s); \
+		if (i == maxLines) return -1; \
+		else return offset; \
+	} \
+	SCOPE void ks_setFileSize(kstream_t *ks) \
+	{ /* set the ks->file_size attribute */ \
+		size_t prev, size; \
+		if (ks->file_size > 0) return; \
+		prev = __seek(ks->f, 0, SEEK_CUR); \
+		size = __seek(ks->f, 0L, SEEK_END); \
+		if (__seek(ks->f, prev, SEEK_SET) != prev) { \
+			fprintf(stderr, "Problem seeking in the kseq file!\n"); \
+			return; \
+		} \
+		ks->file_size = size; \
+	} \
+	SCOPE size_t kseq_seek(kseq_t *seq, size_t filepos, char recordSep) \
+	{ /* seek to the next record at or after filepos */ \
+		size_t offset = 0; \
+		if (recordSep != '@' && recordSep != '>') { \
+			fprintf(stderr, "Invalid use of kseq_seek.  Must choose '>' or '@' for recordSep\n"); \
+			filepos = 0; \
+		} \
+		kstream_t *ks = seq->f; \
+		ks_setFileSize(ks); \
+		ks_rewind(ks); \
+		__seek(ks->f, filepos, SEEK_SET); \
+		ks->file_offset = filepos; \
+		offset = recordSep == '@' ? kseq_nextRecordFastq(seq, filepos) : kseq_nextRecordFasta(seq); \
+		if (offset >= 0) { \
+			return filepos + offset; \
+		} else { \
+			return -1; \
+		} \
+	}
+
+/* TODO add pairing identification and is_interleaved method or variable at init... */
+
 #define __KSEQ_TYPE(type_t)						\
 	typedef struct {							\
 		kstring_t name, comment, seq, qual;		\
@@ -225,11 +332,19 @@ typedef struct __kstring_t {
 
 #define KSEQ_INIT(type_t, __read) KSEQ_INIT2(static, type_t, __read)
 
+#define KSEQ_INIT_SEEKABLE(type_t, __read, __fseek) \
+	KSEQ_INIT2(static, type_t, __read)          \
+	__KSEQ_INIT_SEEK(static, __fseek)
+
 #define KSEQ_DECLARE(type_t) \
 	__KS_TYPE(type_t) \
 	__KSEQ_TYPE(type_t) \
 	extern kseq_t *kseq_init(type_t fd); \
 	void kseq_destroy(kseq_t *ks); \
 	int kseq_read(kseq_t *seq);
+
+#define KSEQ_DECLARE_SEEKABLE(type_t) \
+	KSEQ_DECLARE(type_t) \
+	size_t kseq_seek(kseq_t *seq, size_t filepos, char recordSep);
 
 #endif
