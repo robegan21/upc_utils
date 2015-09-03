@@ -1,5 +1,5 @@
 //
-//  upc_memory_heap.h
+//  upc_dist_memory_heap.h
 //  
 //
 //  Created by Rob Egan on 12/12/14.
@@ -176,8 +176,10 @@ SharedHeapTypePtr getSharedPtrFromDistHeapHandle(DistHeapHandlePtr heapPtr, Heap
     assert(thread < THREADS);
     SharedHeapAllocationPtr heapTail = heapPtr->distHeapData[thread].heapTail;
     assert( upc_threadof(heapTail) == thread );
-    assert( upc_threadof(heapTail + offset) == thread );
-    return (SharedHeapTypePtr) (((SharedBytesPtr) heapTail) + offset);
+
+    SharedHeapTypePtr ptr = (SharedHeapTypePtr) (((SharedBytesPtr) heapTail) + offset);
+    assert( upc_threadof(ptr) == thread );
+    return ptr;
 }
 
 SharedHeapTypePtr getSharedPtrFromCachedDistHeapHandle(CachedDistHeapHandlePtr cachedDistHeapHandle, HeapPos heapPos) {
@@ -188,8 +190,10 @@ SharedHeapTypePtr getSharedPtrFromCachedDistHeapHandle(CachedDistHeapHandlePtr c
     SharedHeapAllocationPtr heapTail = cachedDistHeapHandle->distHeap->distHeapData[thread].heapTail;
     assert( cachedDistHeapHandle->distHeap->distHeapData[thread].heapTail == heapTail);
     assert( upc_threadof(heapTail) == thread );
-    assert( upc_threadof(heapTail + offset) == thread );
-    return (SharedHeapTypePtr) (((SharedBytesPtr) heapTail) + offset);
+
+    SharedHeapTypePtr ptr = (((SharedBytesPtr) heapTail) + offset);
+    assert( upc_threadof(ptr) == thread );
+    return ptr;
 }
 
 SharedHeapAllocationPtr constructHeapAllocation( UPC_INT64_T mySize, SharedHeapTypePtr origin ) {
