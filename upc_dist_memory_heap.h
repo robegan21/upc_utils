@@ -86,8 +86,8 @@ struct HeapPos {
 
 struct DistHeapData {
     // All data is on a single thread
-    SharedHeapAllocationPtr heapHead; // current heap head
-    SharedHeapAllocationPtr heapTail; // never changes after initialization... all HeapPos are relative to this 
+    SharedHeapAllocationPtr heapHead; // never changes after initialization... all HeapPos are relative to this pointer using heapOffest in bytes
+    SharedHeapAllocationPtr activeHeap; // active and current HeapAllocation head
     UPC_INT64_T requestedIncrease; // used to signal insufficient space.  Threads much check periodically, if used
 };
 typedef struct DistHeapData DistHeapData;
@@ -104,8 +104,8 @@ typedef DistHeapHandle *DistHeapHandlePtr;
 typedef struct CachedDistHeapData CachedDistHeapData;
 struct CachedDistHeapData {
     DistHeapData heapData;
-    SharedHeapAllocationPtr heapHead;
-    HeapAllocation heapHeadCopy;
+    SharedHeapAllocationPtr activeHeap;
+    HeapAllocation activeHeapCopy;
 };
 typedef CachedDistHeapData *CachedDistHeapDataPtr;
 
@@ -120,8 +120,8 @@ typedef CachedDistHeapHandle *CachedDistHeapHandlePtr;
 void updateCachedDistHeap(CachedDistHeapHandlePtr cached, int thread) {
     CachedDistHeapDataPtr cachedThreadHandle = cached->cachedDistHeapData + thread;
     cachedThreadHandle->heapData = cached->distHeap->distHeapData[thread]; // copy remote to local
-    cachedThreadHandle->heapHead = cachedThreadHandle->heapData.heapHead;  // shared pointer
-    upc_memget(&(cachedThreadHandle->heapHeadCopy), cachedThreadHandle->heapHead, sizeof(HeapAllocation)); // copy remote HeapAllocation to local
+    cachedThreadHandle->activeHeap = cachedThreadHandle->heapData.activeHeap;  // shared pointer
+    upc_memget(&(cachedThreadHandle->activeHeapCopy), cachedThreadHandle->activeHeap, sizeof(HeapAllocation)); // copy remote HeapAllocation to local
 }
 
 CachedDistHeapHandlePtr constructCachedDistHeap(DistHeapHandlePtr distHeap) {
@@ -151,8 +151,8 @@ void destroyCachedDistHeap(CachedDistHeapHandlePtr *_cached) {
 HeapPos getHeapPosFromDistHeapHandle(DistHeapHandlePtr heapPtr, SharedHeapTypePtr ptr) {
     HeapPos hp;
     UPC_INT64_T thread = upc_threadof(ptr);
-    assert( upc_threadof( heapPtr->distHeapData[thread].heapTail ) == thread );
-    UPC_INT64_T offset = (SharedBytesPtr)ptr - (SharedBytesPtr) heapPtr->distHeapData[thread].heapTail;
+    assert( upc_threadof( heapPtr->distHeapData[thread].heapHead ) == thread );
+    UPC_INT64_T offset = (SharedBytesPtr)ptr - (SharedBytesPtr) heapPtr->distHeapData[thread].heapHead;
     hp.heapPos = GET_HEAP_POS(thread,offset);
     return hp;
 }
@@ -160,24 +160,133 @@ HeapPos getHeapPosFromDistHeapHandle(DistHeapHandlePtr heapPtr, SharedHeapTypePt
 HeapPos getHeapPosFromCachedDistHeapHandle(CachedDistHeapHandlePtr cachedDistHeapHandle, SharedHeapTypePtr ptr) {
     HeapPos hp;
     UPC_INT64_T thread = upc_threadof(ptr);
-    SharedHeapAllocationPtr heapTail = cachedDistHeapHandle->distHeap->distHeapData[thread].heapTail;
-    assert(cachedDistHeapHandle->distHeap->distHeapData[thread].heapTail == heapTail);
-    assert( upc_threadof( heapTail ) == thread );
-    UPC_INT64_T offset = (SharedBytesPtr) ptr - (SharedBytesPtr) heapTail;
+    SharedHeapAllocationPtr heapHead = cachedDistHeapHandle->distHeap->distHeapData[thread].heapHead;
+    assert(cachedDistHeapHandle->distHeap->distHeapData[thread].heapHead == heapHead);
+    assert( upc_threadof( heapHead ) == thread );
+    UPC_INT64_T offset = (SharedBytesPtr) ptr - (SharedBytesPtr) heapHead;
     hp.heapPos = GET_HEAP_POS(thread,offset);
     return hp;
 }
     
+typedef struct HeapIterator HeapIterator;
+struct HeapIterator {
+    SharedHeapAllocationPtr heap;
+    HeapAllocation copy;
+    UPC_INT64_T idx;
+    int thread;
+};
+typedef shared[] HeapIterator *SharedHeapIterator;
+
+long long getHeapAllocationDataStart() {
+    int extraBytes = sizeof(HeapAllocation) % sizeof(HeapType); // get byte-aligned start
+    extraBytes = extraBytes == 0 ? 0 : sizeof(HeapAllocation) - extraBytes;
+    long long dataStart = sizeof(HeapAllocation) + extraBytes;
+    return dataStart;
+}
+
+SharedHeapTypePtr getSharedHeapTypePtr(SharedHeapIterator it) {
+    assert( it->idx < it->copy.size );
+    assert( upc_threadof( it->heap ) == it->thread );
+    SharedHeapTypePtr ptr = (SharedHeapTypePtr) (((SharedBytesPtr) it->heap) + it->copy.heapOffset + it->idx);
+    assert(upc_threadof(ptr) == it->thread);
+    return ptr;
+}
+
+void incrementHeapIterator(SharedHeapIterator it, long long count) {
+    assert(it->idx < it->copy.confirmed); // should not attempt to increment a pointer at the end!
+    assert(it->heap != NULL);
+    long long bytes = count * sizeof(HeapType);
+    if (it->idx + bytes< it->copy.confirmed) {
+        it->idx += bytes;
+    } else {
+        assert(it->idx + bytes == it->copy.size); // iterator is at the precise end of this HeapAllocation
+        SharedHeapAllocationPtr next = it->heap->next;
+        assert(next != NULL); // should not attempt to increment past the end of the HeapAllocationList!
+        it->heap = next;
+        it->copy = *next;
+        it->idx = getHeapAllocationDataStart();;
+    }
+    assert(upc_threadof( getSharedHeapTypePtr( it ) ) == it->thread);
+}
+
+int heapIteratorHasNext(SharedHeapIterator it, SharedHeapIterator end, long long count) {
+    long long bytes = count * sizeof(HeapType);
+    if (it->idx + bytes < it->copy.confirmed) {
+        return 1; // easy more on current heap
+    }
+    if (it->heap != end->heap) {
+        if (end->idx > 0) {
+            return 1; // easy end has some
+        } else {
+            if (it->heap->next != end->heap) {
+                return 1; // since next is not end, it has some
+            } else {
+                return 0; // next is end and does not have any
+            }
+        }
+    } else {
+        // on end... easy check
+        if (it->idx + bytes < end->idx) {
+            return 1;
+        } else {
+            return 0;
+        }
+    }
+}
+
+SharedHeapIterator constructHeapIterator() {
+    SharedHeapIterator it = (SharedHeapIterator) upc_alloc(sizeof(HeapIterator));
+    assert(it != NULL);
+    return it;
+}
+
+void destroyHeapIterator(SharedHeapIterator *it) {
+    upc_free(*it);
+    *it = NULL;
+}
+
+SharedHeapIterator getHeapBegin(DistHeapHandlePtr heapPtr, int thread) {
+    assert( heapPtr != NULL );
+    assert( upc_threadof(heapPtr->distHeapData + thread) == thread);
+    SharedHeapAllocationPtr heapHead = heapPtr->distHeapData[thread].heapHead;
+    assert( heapHead != NULL );
+    assert( upc_threadof(heapHead) == thread );
+    SharedHeapIterator it = constructHeapIterator();
+    it->heap = heapHead;
+    it->copy = *heapHead;
+    it->idx = getHeapAllocationDataStart();
+    it->thread = thread;
+    assert(it->copy.size >= it->copy.offset);
+    assert(it->copy.size >= it->copy.confirmed);
+printf("Thread %d: begin for %d size:%lld\n", MYTHREAD, thread, it->heap->size);
+    return it;
+}
+
+SharedHeapIterator getHeapEnd(DistHeapHandlePtr heapPtr, int thread) {
+    assert( heapPtr != NULL );
+    SharedHeapAllocationPtr activeHeap = heapPtr->distHeapData[thread].activeHeap;
+    assert( activeHeap != NULL );
+    assert( upc_threadof(activeHeap) == thread );
+    SharedHeapIterator it = constructHeapIterator();
+    it->heap = activeHeap;
+    it->copy = *activeHeap;
+    it->idx = it->copy.confirmed;
+    it->thread = thread;
+    assert(it->copy.size >= it->copy.offset);
+    assert(it->copy.size >= it->copy.confirmed);
+    return it;
+}
+
 
 SharedHeapTypePtr getSharedPtrFromDistHeapHandle(DistHeapHandlePtr heapPtr, HeapPos heapPos) {
     UPC_INT64_T thread = GET_HEAP_THREAD( heapPos.heapPos );
     UPC_INT64_T offset = GET_HEAP_OFFSET( heapPos.heapPos );
     assert(thread >= 0);
     assert(thread < THREADS);
-    SharedHeapAllocationPtr heapTail = heapPtr->distHeapData[thread].heapTail;
-    assert( upc_threadof(heapTail) == thread );
+    SharedHeapAllocationPtr heapHead = heapPtr->distHeapData[thread].heapHead;
+    assert( upc_threadof(heapHead) == thread );
 
-    SharedHeapTypePtr ptr = (SharedHeapTypePtr) (((SharedBytesPtr) heapTail) + offset);
+    SharedHeapTypePtr ptr = (SharedHeapTypePtr) (((SharedBytesPtr) heapHead) + offset);
     assert( upc_threadof(ptr) == thread );
     return ptr;
 }
@@ -187,20 +296,20 @@ SharedHeapTypePtr getSharedPtrFromCachedDistHeapHandle(CachedDistHeapHandlePtr c
     UPC_INT64_T offset = GET_HEAP_OFFSET( heapPos.heapPos );
     assert(thread >= 0);
     assert(thread < THREADS);
-    SharedHeapAllocationPtr heapTail = cachedDistHeapHandle->distHeap->distHeapData[thread].heapTail;
-    assert( cachedDistHeapHandle->distHeap->distHeapData[thread].heapTail == heapTail);
-    assert( upc_threadof(heapTail) == thread );
+    SharedHeapAllocationPtr heapHead = cachedDistHeapHandle->distHeap->distHeapData[thread].heapHead;
+    assert( cachedDistHeapHandle->distHeap->distHeapData[thread].heapHead == heapHead);
+    assert( upc_threadof(heapHead) == thread );
 
-    SharedHeapTypePtr ptr = (((SharedBytesPtr) heapTail) + offset);
+    SharedHeapTypePtr ptr = (((SharedBytesPtr) heapHead) + offset);
     assert( upc_threadof(ptr) == thread );
     return ptr;
 }
 
 SharedHeapAllocationPtr constructHeapAllocation( UPC_INT64_T mySize, SharedHeapTypePtr origin ) {
 
-    int extraBytes = sizeof(HeapAllocation) % sizeof(HeapType);
-    extraBytes = extraBytes == 0 ? 0 : sizeof(HeapAllocation) - extraBytes;
-    long long heapAllocSize = sizeof(HeapAllocation) + extraBytes + sizeof(HeapType) * mySize;
+    long long dataSize = sizeof(HeapType) * mySize;
+    long long dataStart = getHeapAllocationDataStart();
+    long long heapAllocSize = dataStart + dataSize;
     SharedHeapAllocationPtr heapAlloc = (SharedHeapAllocationPtr) upc_alloc( heapAllocSize );
     if (heapAlloc == NULL) {
        LOG("Could not upc_alloc %lld bytes\n", heapAllocSize);
@@ -208,11 +317,12 @@ SharedHeapAllocationPtr constructHeapAllocation( UPC_INT64_T mySize, SharedHeapT
     }
     assert(upc_threadof(heapAlloc) == MYTHREAD);
     heapAlloc->heapOffset = origin == NULL ? 0 : ((SharedBytesPtr) origin) - ((SharedBytesPtr) heapAlloc);
-    heapAlloc->size = heapAllocSize;
-    heapAlloc->offset = sizeof(HeapAllocation) + extraBytes;
-    heapAlloc->confirmed = heapAlloc->offset;
+    heapAlloc->size = dataStart + dataSize;
+    heapAlloc->offset = dataStart;
+    heapAlloc->confirmed = dataStart;
     heapAlloc->next = NULL;
     upc_fence;
+    printf("Thread %d: Allocted ne heap with %lld bytes at heapOffset: %lld\n", MYTHREAD, dataStart+dataSize, heapAlloc->heapOffset);
     return heapAlloc;
 }
 
@@ -235,7 +345,7 @@ DistHeapHandlePtr constructDistHeap(UPC_INT64_T mySize) {
     SharedHeapAllocationPtr heapAlloc = constructHeapAllocation(mySize, NULL);
     assert(upc_threadof(heapAlloc) == MYTHREAD);
     distHeapData[MYTHREAD].heapHead = heapAlloc;
-    distHeapData[MYTHREAD].heapTail = heapAlloc;
+    distHeapData[MYTHREAD].activeHeap = heapAlloc;
     distHandle->distHeapData = distHeapData;
     distHandle->nbb = initNBBarrier();
     upc_fence;
@@ -267,7 +377,7 @@ void destroyDistHeap(DistHeapHandlePtr *_distHeap) {
     assert(heapAlloc != NULL);
     destroyHeapAlloc(&heapAlloc);
     distHeap->distHeapData[MYTHREAD].heapHead = NULL;
-    distHeap->distHeapData[MYTHREAD].heapTail = NULL;
+    distHeap->distHeapData[MYTHREAD].activeHeap = NULL;
     upc_all_free(distHeap->distHeapData);
     *_distHeap = NULL;
 }
@@ -285,23 +395,23 @@ void checkMyHeap(DistHeapHandlePtr distHeap) {
     assert(upc_threadof(distHeap->distHeapData + MYTHREAD) == MYTHREAD);
     UPC_INT64_T requestedIncrease = distHeap->distHeapData[MYTHREAD].requestedIncrease;
     if (requestedIncrease != 0) {
-        SharedHeapAllocationPtr lastHead = distHeap->distHeapData[MYTHREAD].heapHead;
-        assert(upc_threadof(lastHead) == MYTHREAD);
-        UPC_INT64_T growSize = lastHead->size;
+        SharedHeapAllocationPtr lastActiveHeap = distHeap->distHeapData[MYTHREAD].activeHeap;
+        assert(upc_threadof(lastActiveHeap) == MYTHREAD);
+        UPC_INT64_T growSize = lastActiveHeap->size;
         if (distHeap->distHeapData[MYTHREAD].requestedIncrease > growSize) growSize = distHeap->distHeapData[MYTHREAD].requestedIncrease * 2;
-        SharedHeapAllocationPtr heapAlloc = constructHeapAllocation(growSize, (SharedHeapTypePtr) distHeap->distHeapData[MYTHREAD].heapTail);
+        SharedHeapAllocationPtr heapAlloc = constructHeapAllocation(growSize, (SharedHeapTypePtr) distHeap->distHeapData[MYTHREAD].heapHead);
         if (heapAlloc == NULL) {
-            LOG("Could not grow my heap by %lld bytes\n", growSize);
+            LOG("Could not grow my heap by %lld bytes\n", (long long) growSize);
             upc_global_exit(1);
         }
         // Link old head to this new heapAlloc
         assert(heapAlloc->next == NULL);
-        heapAlloc->next = distHeap->distHeapData[MYTHREAD].heapHead;
+        heapAlloc->next = distHeap->distHeapData[MYTHREAD].activeHeap;
         // Link this new to head
-        assert(distHeap->distHeapData[MYTHREAD].heapHead == lastHead);
-        distHeap->distHeapData[MYTHREAD].heapHead = heapAlloc;
+        assert(distHeap->distHeapData[MYTHREAD].activeHeap == lastActiveHeap);
+        distHeap->distHeapData[MYTHREAD].activeHeap = heapAlloc;
         assert(requestedIncrease == distHeap->distHeapData[MYTHREAD].requestedIncrease);
-        distHeap->distHeapData[MYTHREAD].requestedIncrease = 0;
+        UPC_ATOMIC_CSWAP_I64( &(distHeap->distHeapData[MYTHREAD].requestedIncrease), requestedIncrease, 0);
         upc_fence;
     }
 }
@@ -310,7 +420,7 @@ AllocatedHeap tryAllocRange(DistHeapHandlePtr distHeap, UPC_INT64_T thread, UPC_
     assert(thread >= 0);
     assert(thread < THREADS);
     assert(upc_threadof( &(distHeap->distHeapData[thread]) ) == thread);
-    SharedHeapAllocationPtr heapAlloc = distHeap->distHeapData[thread].heapHead;
+    SharedHeapAllocationPtr heapAlloc = distHeap->distHeapData[thread].activeHeap;
     assert(heapAlloc != NULL);
     assert(upc_threadof(heapAlloc) == thread);
     HeapAllocation localHeapAlloc = *heapAlloc;
@@ -321,6 +431,8 @@ AllocatedHeap tryAllocRange(DistHeapHandlePtr distHeap, UPC_INT64_T thread, UPC_
     UPC_INT64_T requestedIncrease = count * sizeof(HeapType);
     if (localHeapAlloc.size >= localHeapAlloc.offset + requestedIncrease) { 
         UPC_INT64_T myOffset = UPC_ATOMIC_FADD_I64( &(heapAlloc->offset), requestedIncrease );
+        assert(myOffset >= localHeapAlloc.offset);
+        assert(heapAlloc->offset >= myOffset + requestedIncrease);
         if (myOffset + requestedIncrease <= localHeapAlloc.size) {
           // Success! return allocated information
           ret.ptr = ((SharedBytesPtr) heapAlloc) + heapAlloc->heapOffset + myOffset;
@@ -328,15 +440,17 @@ AllocatedHeap tryAllocRange(DistHeapHandlePtr distHeap, UPC_INT64_T thread, UPC_
           ret.count = count;
         } else {
           // Failure! return no allocation
-          UPC_INT64_T corrected = UPC_ATOMIC_FADD_I64( &(heapAlloc->offset), - requestedIncrease );
-          if (distHeap->distHeapData[thread].heapHead == heapAlloc) {
-              // signal for more HeapAllocations
-              UPC_ATOMIC_CSWAP_I64( &(distHeap->distHeapData[thread].requestedIncrease), 0, requestedIncrease);
-          }
+          // Do not correct because of possible race condition
+          // signal for more HeapAllocations
+          printf("Thread %d: raced out of space. requesting %lld more bytes on thread %lld (got %lld of %lld)\n", MYTHREAD, (long long) requestedIncrease, (long long) thread, (long long) myOffset, (long long) localHeapAlloc.size);
+          UPC_ATOMIC_CSWAP_I64( &(distHeap->distHeapData[thread].requestedIncrease), 0, requestedIncrease);
+          UPC_POLL;
         }
     } else {
         // signal for more HeapAllocations
+        printf("Thread %d: requesting %lld more bytes on thread %lld (found %lld of %lld)\n", MYTHREAD, (long long) requestedIncrease, (long long) thread, (long long) localHeapAlloc.offset, (long long) localHeapAlloc.size);
         UPC_ATOMIC_CSWAP_I64( &(distHeap->distHeapData[thread].requestedIncrease), 0, requestedIncrease);
+        UPC_POLL;
     }
 
     checkMyHeap(distHeap);
@@ -350,10 +464,17 @@ SharedHeapTypePtr tryPutData(DistHeapHandlePtr distHeap, UPC_INT64_T thread, Hea
         assert(allocated.ptr != NULL);
         assert(upc_threadof(allocated.ptr) == thread);
         assert(upc_threadof(allocated.ptr + count) == thread);
+
+        // send the data
         upc_memput(allocated.ptr, data, count*sizeof(HeapType));
+
+        // confirm the send
+// TODO implement consistency none: no confirmed, relaxed: fadd vs strict: while(!cmpswp)
         upc_fence;
         UPC_INT64_T confirmed = UPC_ATOMIC_FADD_I64( &(allocated.heapAlloc->confirmed), count*sizeof(HeapType) ); 
         assert(confirmed + count*sizeof(HeapType) <= allocated.heapAlloc->size);
+        assert(confirmed <= allocated.heapAlloc->offset);
+        assert(allocated.heapAlloc->confirmed >= confirmed+count*sizeof(HeapType));
         return allocated.ptr; 
     } else {
         // Failure!

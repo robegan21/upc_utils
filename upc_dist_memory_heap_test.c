@@ -44,7 +44,8 @@
 #include "upc_dist_memory_heap.h"
 
 struct _mytype {
-	int a, b, c;
+	int thread;
+	long long idx;
 	HeapPos hp;
 };
 typedef struct _mytype mytype;
@@ -55,87 +56,96 @@ typedef shared[] mytype *sharedMyTypePtr;
 
 mytype getValue(thread, idx, size) {
 	mytype x;
-	x.a = thread * size + idx;
-	x.b = x.a * 10;
-	x.c = x.b * 10 + thread - idx; 
+	x.thread = thread;
+	x.idx = idx;
 	x.hp.heapPos = 0;
 	return x;
 }
 
 int main() {
 	/* initialize memory */
-	long long mysize = 1000;
+	long long mysize = 128;
 	long long mytypesize = sizeof(mytype);
-	mytype *x = (mytype*) malloc( mysize * sizeof(mytypesize));;
-        for(int i = 0; i < mysize; i++) {
-            x[i] = getValue(MYTHREAD, i, mysize);
+	mytype *x = (mytype*) malloc( mysize * mytypesize);;
+        long long step = 1;
+	printf("Thread %d: mytypesize=%lld\n", MYTHREAD, mytypesize);
+        for(long long i = 0; i < (mysize+step-1)/step; i++) {
+		for(long long j = 0; j < step; j++) {
+			x[i*step+j] = getValue(MYTHREAD, i*step+j, mysize);
+			assert(x[i*step+j].thread == MYTHREAD);
+			assert(x[i*step+j].hp.heapPos == 0);
+			LOG("Thread %d: constructed i=%lld j=%lld idx=%lld, x.thread=%d x.idx=%lld\n", MYTHREAD, i, j, i*step+j, x[i*step+j].thread, x[i*step+j].idx);
+		}
         }
 
 	// test single allocation event
 	DistHeapHandlePtr dh = constructDistHeap(mytypesize*mysize);	
         
-        long long step = 1;
-	for(int i = 0; i + step <= mysize; i+=step) {
-		int thread = (MYTHREAD+i)%THREADS;
-		SharedHeapTypePtr lastPos;
-		while( NULL == (lastPos = tryPutData(dh, thread, (HeapType*) (x+i), step*mytypesize))) { 
-			LOG("Attempt to put %lld to %d failed!\n", step*mytypesize, thread);
+	SharedHeapTypePtr lastPos = NULL;
+	for(long long i = 0; i < (mysize+step-1)/step; i++) {
+		int destthread = (MYTHREAD+i)%THREADS;
+		for(long long j = 0; j < step ; j++) {
+			LOG("Thread %d: Sending i=%lld j=%lld idx=%lld, x.thread=%d x.idx=%lld\n", MYTHREAD, i, j, i*step+j, x[i*step+j].thread, x[i*step+j].idx);
+			assert(x[i*step+j].thread == MYTHREAD);
+			assert(x[i*step+j].hp.heapPos == 0);
+			x[i*step+j].hp = getHeapPosFromDistHeapHandle(dh, lastPos == NULL ? NULL : lastPos + j);
 		}
-		assert( ((sharedMyTypePtr) lastPos)->a == x[i].a );
-		assert( ((sharedMyTypePtr) lastPos)->b == x[i].b );
-		assert( ((sharedMyTypePtr) lastPos)->c == x[i].c );
-		assert( ((sharedMyTypePtr) lastPos)->hp.heapPos == x[i].hp.heapPos );
+		while( NULL == (lastPos = tryPutData(dh, destthread, (HeapType*) (x+i*step), step*mytypesize))) { 
+			LOG("Thread %d: Attempt to put %lld elements %lld bytes to %d failed!\n", MYTHREAD, step, step*mytypesize, destthread);
+		}
+		assert(lastPos != NULL);
+		assert(upc_threadof(lastPos) == destthread);
+		for(long long j = 0; j < step ; j++) {
+			assert( ((sharedMyTypePtr) (lastPos+j))->thread == MYTHREAD);
+			assert( ((sharedMyTypePtr) (lastPos+j))->idx == i*step+j);
+		}
         }
 	distHeapBarrier(dh);
-            
+	upc_fence;
+	upc_barrier;
 	// validate contents of mythread...
 	assert(upc_threadof(dh->distHeapData + MYTHREAD) == MYTHREAD);
 	SharedHeapAllocationPtr heapHead = dh->distHeapData[MYTHREAD].heapHead;
 	assert(upc_threadof(heapHead) == MYTHREAD);
-	mytype *myreceived = (mytype*) heapHead;
-	assert(dh->distHeapData[MYTHREAD].heapHead == dh->distHeapData[MYTHREAD].heapTail); // i.e. only one allocation event
-	for(int i = 0; i + step <= mysize; i+=step) {
-		int fromThread = (MYTHREAD-i)%THREADS;
-		mytype expected = getValue(fromThread, i, mysize);
-		assert( expected.a == myreceived[i].a );
-		assert( expected.b == myreceived[i].b );
-		assert( expected.c == myreceived[i].c );
+	assert(dh->distHeapData[MYTHREAD].heapHead == dh->distHeapData[MYTHREAD].activeHeap); // i.e. only one allocation event
+	assert(dh->distHeapData[MYTHREAD].heapHead->size > 0);
+	assert(dh->distHeapData[MYTHREAD].heapHead->offset > 0);
+	assert(dh->distHeapData[MYTHREAD].heapHead->offset == dh->distHeapData[MYTHREAD].heapHead->confirmed);
+	SharedHeapIterator begin = getHeapBegin(dh, MYTHREAD), end = getHeapEnd(dh,MYTHREAD);
+	assert(begin->heap == dh->distHeapData[MYTHREAD].heapHead);
+	assert(end->heap == dh->distHeapData[MYTHREAD].activeHeap);
+	assert(begin->heap == end->heap); // only 1 allocation event
+	assert(begin->idx == getHeapAllocationDataStart());
+	assert(end->idx == end->heap->confirmed);
+	LOG("Thread %d: begin: %lld confirmed:%lld size:%lld offset:%lld heapOffset:%lld\n", MYTHREAD, begin->idx, begin->heap->confirmed, begin->heap->size, begin->heap->offset, begin->heap->heapOffset);
+	LOG("Thread %d: end: %lld confirmed:%lld size:%lld offset: %lld heapOffset:%lld\n", MYTHREAD, end->idx, end->heap->confirmed, end->heap->size, end->heap->offset, end->heap->heapOffset);
+	assert(end->idx > mytypesize * mysize);
+	long long idx = 0;
+	while ( heapIteratorHasNext(begin, end, mytypesize) ) {
+		SharedHeapTypePtr ptr = getSharedHeapTypePtr( begin );	
+		assert( upc_threadof(ptr) == MYTHREAD );
+		mytype *myreceived = (mytype*) ptr;
+		int fromThread = (THREADS*mysize+MYTHREAD-(myreceived->idx/step))%THREADS;
+		LOG("Thread %d: iterator idx=%lld, received.thread=%d, received.idx=%lld, expecedFrom:%d\n", MYTHREAD, idx, myreceived->thread, myreceived->idx, fromThread);
+		assert(myreceived->thread == fromThread);
+		incrementHeapIterator( begin, mytypesize );
+		idx++;
+	}	
+	upc_barrier;
+
+	begin = getHeapBegin(dh, MYTHREAD);
+	mytype *myreceived2 = (mytype*) getSharedHeapTypePtr( begin );
+	for(long long i = 0; i < (mysize+step-1)/step; i++) {
+//		int fromThread = (THREADS*mysize+MYTHREAD-i)%THREADS;
+		for(long long j = 0; j < step; j++) {
+			int fromThread = (THREADS*mysize+MYTHREAD-(myreceived2[i*step+j].idx/step))%THREADS;
+			LOG("Thread %d: received i=%lld j=%lld idx=%lld, received.thread=%d, received.idx=%lld, expecedFrom:%d\n", MYTHREAD, i, j, i*step+j, myreceived2[i*step+j].thread, myreceived2[i*step+j].idx, fromThread);
+			assert(myreceived2[i*step+j].thread == fromThread);
+		}
 	}
-         
+        destroyHeapIterator(&begin);
+	destroyHeapIterator(&end); 
 	destroyDistHeap(&dh);
 
-/* 
-OLD VERSION
-	stat_memory_heap_t *stat_memory = stat_init_heap(1000);
-	stat_shared_buffer_t myheap = stat_memory->heap_ptrs[MYTHREAD];
-	assert(upc_threadof( myheap ) == MYTHREAD);
-	assert(myheap->tracker.index == 0);
-	assert(myheap->tracker.written == 0);
-	assert(myheap->tracker.size == 1000);
-	assert(myheap->tracker.tag == 0);
-	
-	for(i = 0; i < 1000; i++) {
-		x.a += i;
-		x.b += i;
-		x.c += i;
-		stat_batched_put_buffer(stat_memory, (MYTHREAD+i)%THREADS, &x);
-	}
-	
-	stat_finish_processing( stat_memory );
-	assert(myheap->tracker.index == 1000);
-	assert(myheap->tracker.written == 1000);
-	assert(myheap->tracker.size == 1000);
-	//assert(myheap->tracker.tag == 0);
-	
-	stat_shared_type tmp = &(myheap->buffer_start);
-	for(i = 0; i < 1000; i++) {
-		assert(tmp->a != 0);
-		tmp++;
-	}
-	
-	stat_free_heap( &stat_memory );
-
-*/
-	
 	return 0;
 }
