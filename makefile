@@ -1,4 +1,4 @@
-EXECUTABLES = testFileCache testFileCache2
+EXECUTABLES = testFileCache testFileCache-nommap
 
 UPCFLAGS := -O
 
@@ -10,7 +10,7 @@ all: $(EXECUTABLES)
 testFileCache : testFileCache.o Buffer.o FileMap.o
 	upcc $(UPCFLAGS) -o $@ $^
 
-testFileCache2 : testFileCache.o Buffer.o FileMap2.o
+testFileCache-nommap : testFileCache.o Buffer.o FileMap-nommap.o
 	upcc $(UPCFLAGS) -o $@ $^
 
 .PHONY: clean
