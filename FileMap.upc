@@ -35,7 +35,9 @@ FileMap initFileMap(const char *filename, const char *mode, int myPartition, int
     fm->filename = strdup(filename);
     fm->myPartition = 0;
     fm->numPartitions = 0;
+#ifndef NO_MMAP
     fm->addr = mmap(NULL, fm->filesize, PROT_READ, MAP_FILE | MAP_SHARED, fileno(fm->fh), 0);
+#endif
     if (numPartitions > 1) {
         setMyPartitionFileMap(fm, myPartition, numPartitions);
     } else {
@@ -59,7 +61,7 @@ void freeFileMap(FileMap *pfm) {
 }
 
 void releaseMmapFileMap(FileMap fm) {
-    munmap(fm->addr, fm->filesize);
+    if (fm->addr) munmap(fm->addr, fm->filesize);
     fm->addr = NULL;
     fm->myStart = 0;
     fm->myEnd = 0;
@@ -86,13 +88,18 @@ void setMyPartitionFileMap(FileMap fm, int myPartition, int numPartitions) {
         }
         if (myPartition && fm->myStart < fm->myEnd) {
             fm->myPos = fm->myStart;
-            // read next line
-            getLineFileMap(fm);
-            fm->myStart = fm->myPos;
+            if (!fm->adjustedStart) {
+                // read next line
+                fseek(fm->fh, fm->myPos, SEEK_SET);
+                getLineFileMap(fm);
+                fm->myStart = fm->myPos;
+                fm->adjustedStart++;
+            }
         } else if (myPartition == 0) {
+            assert(fm->myStart == 0);
             fm->myPos = 0;
         } else {
-            fm->myPos = fm->myEnd;
+            fm->myStart = fm->myPos = fm->myEnd;
         }
         fm->myPartition = myPartition;
         fm->numPartitions = numPartitions;
@@ -100,7 +107,7 @@ void setMyPartitionFileMap(FileMap fm, int myPartition, int numPartitions) {
         fm->myPos = fm->myStart;
     }
     size_t offset = fm->myStart % 4096;
-    //madvise(fm->addr + fm->myStart - offset, fm->myEnd - fm->myStart + offset, MADV_WILLNEED);
+    //if(fm->addr) madvise(fm->addr + fm->myStart - offset, fm->myEnd - fm->myStart + offset, MADV_WILLNEED);
 }
 
 size_t haveMoreFileMap(FileMap fm) {
@@ -113,6 +120,9 @@ size_t haveMoreFileMap(FileMap fm) {
 
 // acts on the mmap
 char *getLineFileMap(FileMap fm) { 
+#ifdef NO_MMAP
+    return fgetsFileMap(fm);
+#endif
     resetBuffer(fm->buf);
     if (fm->myPos >= fm->myEnd) return NULL;
     char *start = fm->addr + fm->myPos;
@@ -141,8 +151,8 @@ char *fgetsFileMap(FileMap fm) {
 }
 
 void rewindFileMap(FileMap fm) {
-    fseek(fm->fh, fm->myStart, SEEK_SET);
     setMyPartitionFileMap(fm, fm->myPartition, fm->numPartitions);
+    fseek(fm->fh, fm->myStart, SEEK_SET);
 }
 size_t tellFileMap(FileMap fm) {
     return fm->myPos;

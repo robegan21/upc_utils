@@ -14,6 +14,7 @@ typedef struct {
     char *filename;
     int myPartition, numPartitions;
     Buffer buf;
+    short adjustedStart;
 } _FileMap;
 typedef _FileMap *FileMap;
 
