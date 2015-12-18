@@ -5,6 +5,8 @@
 #include <sys/mman.h>
 #include <assert.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+
 
 #include "FileMap.h"
 
@@ -61,7 +63,9 @@ void freeFileMap(FileMap *pfm) {
 }
 
 void releaseMmapFileMap(FileMap fm) {
+#ifndef NO_MMAP
     if (fm->addr) munmap(fm->addr, fm->filesize);
+#endif
     fm->addr = NULL;
     fm->myStart = 0;
     fm->myEnd = 0;
@@ -107,7 +111,11 @@ void setMyPartitionFileMap(FileMap fm, int myPartition, int numPartitions) {
         fm->myPos = fm->myStart;
     }
     size_t offset = fm->myStart % 4096;
-    //if(fm->addr) madvise(fm->addr + fm->myStart - offset, fm->myEnd - fm->myStart + offset, MADV_WILLNEED);
+    size_t adviseStart = fm->myStart - offset, adviseLen = fm->myEnd - fm->myStart + offset;
+//    posix_fadvise(fileno(fm->fh), adviseStart, adviseLen, POSIX_FADV_SEQUENTIAL);
+#ifdef NO_MMAP
+//    if(fm->addr) madvise(fm->addr + fm->myStart - offset, fm->myEnd - fm->myStart + offset, MADV_SEQUENTIAL);
+#endif
 }
 
 size_t haveMoreFileMap(FileMap fm) {
