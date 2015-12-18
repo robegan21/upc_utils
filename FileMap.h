@@ -10,11 +10,10 @@ extern "C" {
 typedef struct {
     FILE *fh;
     char *addr;
-    size_t myPos, myStart, myEnd, filesize;;
+    size_t myPos, myStart, myEnd, filesize, blockOffset;
     char *filename;
     int myPartition, numPartitions;
     Buffer buf;
-    short adjustedStart;
 } _FileMap;
 typedef _FileMap *FileMap;
 
@@ -39,6 +38,7 @@ size_t getPosFileMap(FileMap fm);
 char *fgetsFileMap(FileMap fm);
 void rewindFileMap(FileMap fm);
 size_t tellFileMap(FileMap fm);
+void seekFileMap(FileMap fm, size_t pos);
 
 #if defined (__cplusplus)
 }
