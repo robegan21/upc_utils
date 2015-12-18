@@ -10,6 +10,10 @@
 
 #include "FileMap.h"
 
+#ifndef BLOCK_SIZE
+#define BLOCK_SIZE 4096
+#endif
+
 #ifndef DIE
 #define DIE(fmt,...)                                                                                                    \
     do {                                                                \
@@ -44,13 +48,15 @@ FileMap initFileMap(const char *filename, const char *mode, int myPartition, int
         fm->myEnd = fm->filesize;
     }
 #ifndef NO_MMAP
-    fm->blockOffset = fm->myStart % 4096;
+    fm->blockOffset = fm->myStart % BLOCK_SIZE;
     size_t size = fm->myEnd - fm->myStart;
     if (size > 0) {
         fm->addr = mmap(NULL, size + fm->blockOffset, PROT_READ, MAP_FILE | MAP_SHARED, fileno(fm->fh), fm->myStart - fm->blockOffset);
     } else {
         fm->addr = NULL;
     }
+#else
+    fm->addr = NULL;
 #endif
     return fm;
 }
@@ -118,11 +124,15 @@ void setMyPartitionFileMap(FileMap fm, int myPartition, int numPartitions) {
         fm->numPartitions = numPartitions;
     }
     seekFileMap(fm, fm->myStart);
-    size_t offset = fm->myStart % 4096;
+    size_t offset = fm->myStart % BLOCK_SIZE;
     size_t adviseStart = fm->myStart - offset, adviseLen = fm->myEnd - fm->myStart + offset;
+#ifndef NO_FADVISE
     posix_fadvise(fileno(fm->fh), adviseStart, adviseLen, POSIX_FADV_SEQUENTIAL);
-#ifdef NO_MMAP
+#endif
+#ifndef NO_MMAP
+#ifndef NO_MADVISE
     if(fm->addr) madvise(fm->addr, adviseLen, MADV_SEQUENTIAL);
+#endif
 #endif
 }
 
