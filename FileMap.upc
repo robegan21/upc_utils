@@ -127,7 +127,9 @@ void setMyPartitionFileMap(FileMap fm, int myPartition, int numPartitions) {
     size_t offset = fm->myStart % BLOCK_SIZE;
     size_t adviseStart = fm->myStart - offset, adviseLen = fm->myEnd - fm->myStart + offset;
 #ifndef NO_FADVISE
+#ifndef __APPLE__
     posix_fadvise(fileno(fm->fh), adviseStart, adviseLen, POSIX_FADV_SEQUENTIAL);
+#endif
 #endif
 #ifndef NO_MMAP
 #ifndef NO_MADVISE
