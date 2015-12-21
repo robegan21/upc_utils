@@ -1,13 +1,19 @@
+#include <stdio.h>
 #include <assert.h>
+
 #include "Buffer.h"
+
+#ifndef DIE
+#define DIE(fmt, ...) do { fprintf(stderr, fmt, ##__VA_ARGS__); exit(1); } while(0)
+#endif
 
 // returns a new Buffer
 Buffer initBuffer(size_t initSize) {
     if (initSize <= 0) initSize = 256;
     Buffer b = (_Buffer *) malloc(sizeof(_Buffer));
-    if (b == NULL) { fprintf(stderr, "Could not allocate new Buffer!\n"); exit(1); }
+    if (b == NULL) { DIE("Could not allocate new Buffer!\n"); }
     b->buf = (char*) malloc(initSize);
-    if (b->buf == NULL) { fprintf(stderr, "Could not allocate %ld bytes into Buffer!\n", initSize); exit(1); }
+    if (b->buf == NULL) { DIE("Could not allocate %ld bytes into Buffer!\n", initSize); }
     b->len = 0;
     b->size = initSize;
     assert(b->len < b->size);
@@ -25,7 +31,7 @@ size_t growBuffer(Buffer b, size_t appendSize) {
         }
         assert(b->size >= requiredSize);
         b->buf = (char*) realloc(b->buf, b->size);
-        if (b->buf == NULL)  { fprintf(stderr, "Could not reallocate %ld bytes into Buffer!", b->size); exit(1); }
+        if (b->buf == NULL)  { DIE("Could not reallocate %ld bytes into Buffer!", b->size); }
         b->buf[b->len] = '\0';
     }
     assert(b->len + appendSize < b->size);

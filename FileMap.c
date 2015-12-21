@@ -1,4 +1,3 @@
-#include <upc.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
@@ -9,18 +8,10 @@
 
 
 #include "FileMap.h"
+#include "CommonParallel.h"
 
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE 4096
-#endif
-
-#ifndef DIE
-#define DIE(fmt,...)                                                                                                    \
-    do {                                                                \
-        fprintf(stderr, "Thread %d, DIE [%s:%d]: " fmt,             \
-                MYTHREAD, __FILE__, __LINE__, ##__VA_ARGS__);           \
-        upc_global_exit(1);                                                   \
-    } while (0)
 #endif
 
 size_t get_file_size(const char *fname)
