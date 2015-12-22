@@ -4,8 +4,8 @@ EXECUTABLE_BUILDS = $(foreach t, $(TYPES), $(foreach e, $(EXECUTABLES), $(e)-$(t
 
 CC = gcc
 MPICC = mpicc
-CFLAGS := -O2 -DNDEBUG
-UPCFLAGS := -O -DNDEBUG
+CFLAGS := -O2 -DNDEBUG -DNO_MMAP
+UPCFLAGS := -O -DNDEBUG -DNO_MMAP
 #CFLAGS := -O -DDEBUG -g -DNO_MMAP
 #UPCFLAGS := -O -g -DNO_MMAP
 
