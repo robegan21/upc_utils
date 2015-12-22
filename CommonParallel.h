@@ -24,19 +24,21 @@ extern "C" {
 
 /* First defined the EXIT_FUNC that will be used */
 #ifdef __UPC__
+  /* UPC */
   #define EXIT_FUNC(code) upc_global_exit(code)
-  #define INIT(argc, argv)
-  #define FINALIZE()
-
+  #define INIT(argc, argv) { /* noop */ }
+  #define FINALIZE() { /* noop */ }
 #else
   #ifdef MPI_VERSION
+    /* MPI */
     #define EXIT_FUNC(code) do { MPI_Abort(MPI_COMM_WORLD, code); exit(code); } while (0)
     #define INIT(argc, argv) MPI_Init(&argc, &argv)
     #define FINALIZE() MPI_Finalize()
   #else
+    /* OpenMP */
     #define EXIT_FUNC(x) exit(x)
-    #define INIT(argc, argv) {}
-    #define FINALIZE() {}
+    #define INIT(argc, argv) _Pragma("omp parallel") {
+    #define FINALIZE() }
   #endif
 #endif
 
@@ -46,7 +48,7 @@ extern "C" {
 
 #ifndef LOG
 static void writeMyLog(int level, const char *fmt, ...);
-#define LOG(level, fmt, ...) if (VERBOSE >= level) { writeMyLog(level, fmt, ##__VA_ARGS__); } 
+#define LOG(level, fmt, ...) do { if (VERBOSE >= level) { writeMyLog(level, fmt, ##__VA_ARGS__); }  } while (0)
 #endif
 
 #ifndef DIE
@@ -78,8 +80,9 @@ static inline void closeMyLog();
 #ifdef __UPC__
 
   // UPC 
-  #pragma message "Using UPC CommonParallel.h"
+  #include <upc.h>
   #include "upc_compatiblity.h"
+  #pragma message "Using UPC CommonParallel.h"
 
   #define BARRIER upc_barrier
   #define NOW() UPC_TICKS_TO_SECS( UPC_TICKS_NOW() )
@@ -88,6 +91,7 @@ static inline void closeMyLog();
 
   #ifdef MPI_VERSION
     // // MPI, ensure mpi.h is loaded
+    #include <mpi.h>
     #pragma message "Using MPI CommonParallel.h"
 
     #define CHECK_MPI(x) CHECK_ERR(x, MPI_SUCCESS)
@@ -108,6 +112,7 @@ static inline void closeMyLog();
     // OpenMP or bust!
 
     #ifdef _OPENMP
+      #include <omp.h>
       #pragma message "Using OpenMP in CommonParallel.h"
       // OpenMP, ensure omp.h is loaded
 
@@ -126,30 +131,17 @@ static inline void closeMyLog();
     #endif
 
     static inline int __get_THREADS() { 
-        static int _threads = 0;
-        if (_threads <= 0) {
-            if (omp_in_parallel()) {
-              #pragma omp serial
-              _threads = omp_get_num_threads();
-              #pragma omp barrier
-            } else {
-              #pragma omp parallel
-              {
-                #pragma omp serial
-                _threads = omp_get_num_threads();
-              }
-            }
-        }
-        assert(_threads > 0);
-        return _threads;
+        return omp_get_num_threads();
     }
-             
+
     static inline int __get_MYTHREAD() {
          return omp_get_thread_num();
     }
 
-    static inline void __barrier() {
+    static inline void __barrier(const char * file, int line) {
+         LOG(1, "Barrier: %s:%d-%d\n", file, line, __get_MYTHREAD());
          #pragma omp barrier
+         LOG(2, "Past Barrier %s:%d-%d\n", __get_MYTHREAD(),file, line, __get_MYTHREAD());
     }
     static inline double __get_seconds() {
         struct timeval tv;
@@ -157,7 +149,7 @@ static inline void closeMyLog();
         return ((long long) tv.tv_usec + 1000000 * (long long) tv.tv_sec) / (double) 1000000.0;
     }
 
-    #define BARRIER __barrier()
+    #define BARRIER __barrier(__FILE__, __LINE__)
     #define NOW() __get_seconds()
 
   #endif
@@ -181,48 +173,36 @@ static inline void closeMyLog();
   }
   typedef struct { FILE *f; } FILE2;
   static inline FILE2 *_getMyLog() {
+    int i;
     #ifdef __UPC__
-      static shared[] FILE2 *_mylog = NULL;
-      if (_mylog == NULL) {
-        BARRIER;
-        _mylog = (shared[] FILE2 *) upc_all_alloc(THREADS, sizeof(FILE2));
-        assert(upc_threadof(&(_mylog[MYTHREAD])) == MYTHREAD);
-        FILE2 *f = (FILE2 *) &_mylog[MYTHREAD];
-        assert(f != NULL);
-        f->f = stderr;
-        BARRIER;
+      static shared[1] FILE2 _mylog[THREADS];
+      assert(upc_threadof(&(_mylog[MYTHREAD])) == MYTHREAD);
+      assert(upc_threadof(_mylog + MYTHREAD) == MYTHREAD);
+      FILE2 *f2 = (FILE2*) &(_mylog[MYTHREAD].f);
+      assert(f2 != NULL);
+      if (f2->f == NULL) {
+        f2->f = stderr;
         (*hasMyLog())++;
       }
-      assert(_mylog != NULL);
-      assert(_mylog[MYTHREAD].f != (FILE*) NULL);
-      assert(upc_threadof(_mylog + MYTHREAD) == MYTHREAD);
-      FILE2 *f = (FILE2 *) &_mylog[MYTHREAD];
-      return (FILE2*) f;
+      return f2;
     #else
       static FILE2 *_mylog = NULL;
+      #pragma omp threadprivate(_mylog)
       #ifdef MPI_VERSION
-        if (_mylog == NULL) {
-          _mylog = (FILE2*) calloc(1, sizeof(FILE2));
-          assert(_mylog);
+        if(_mylog == NULL) {
+          _mylog = calloc(1, sizeof(FILE2));
           _mylog->f = stderr;
-          BARRIER;
           (*hasMyLog())++;
         }
-        assert(_mylog != NULL && _mylog->f != NULL);
+        assert(_mylog->f != NULL);
         return _mylog; 
       #else
         if (_mylog == NULL) {
-          BARRIER;
-          if (!MYTHREAD) {
-            _mylog = (FILE2*) calloc(THREADS, sizeof(FILE2));
-          }
-          BARRIER;
-          assert(_mylog != NULL && _mylog[MYTHREAD].f == NULL);
-          _mylog[MYTHREAD].f = stderr;
-          (*hasMyLog())++;
+          _mylog = calloc(1, sizeof(FILE2));
+          _mylog->f = stderr;
         }
-        assert(_mylog != NULL && _mylog[MYTHREAD].f != NULL);
-        return _mylog + MYTHREAD;
+        assert(_mylog->f != NULL);
+        return _mylog;
       #endif 
       
     #endif
@@ -263,8 +243,8 @@ static inline void closeMyLog();
     time_t rawtime; struct tm *timeinfo; 
     time( &rawtime ); timeinfo = localtime( &rawtime ); 
     char newfmt[1024];
-    snprintf(newfmt, 1024, "Thread %d [%s %s]: %s", MYTHREAD,
-            level == 0 ? "ALL" : (level == 1 ? "INFO" : "DEBUG" "level"), asctime(timeinfo), fmt);
+    snprintf(newfmt, 1024, "Thread %d [%s %.19s]: %s", MYTHREAD,
+            level == 0 ? "ALL" : (level == 1 ? "INFO" : "DEBUG"), asctime(timeinfo), fmt);
 
     va_list args;
     va_start(args, fmt);
@@ -272,9 +252,13 @@ static inline void closeMyLog();
     va_end(args);
   } 
 
-  #define LOG2(level, fmt, ...) fprintf(getMyLog(), fmt, ##__VA_ARGS__)
+  #define SLOG(level, fmt, ...) if (MYTHREAD == 0) LOG(level, fmt, ##__VA_ARGS__)
+
+  #define LOG2(level, fmt, ...) do {fprintf(getMyLog(), fmt, ##__VA_ARGS__) } while (0)
 
   #define LOG_FLUSH(level, fmt, ...) do { LOG(level, fmt, ##__VA_ARGS__); fflush(getMyLog()); } while (0)
+
+  #define SLOG_FLUSH(level, fmt, ...) do { SLOG(level, fmt, ##__VA_ARS__); fflush(getMyLog()); } while (0)
 
   #define SDIE(fmt,...)                                                                                                   \
     do {                                                                \
