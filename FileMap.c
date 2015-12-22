@@ -38,7 +38,9 @@ FileMap initFileMap(const char *filename, const char *mode, int myPartition, int
         fm->myStart = 0;
         fm->myEnd = fm->filesize;
     }
-#ifndef NO_MMAP
+#ifdef NO_MMAP
+    fm->addr = NULL;
+#else
     fm->blockOffset = fm->myStart % BLOCK_SIZE;
     size_t size = fm->myEnd - fm->myStart;
     if (size > 0) {
@@ -46,8 +48,6 @@ FileMap initFileMap(const char *filename, const char *mode, int myPartition, int
     } else {
         fm->addr = NULL;
     }
-#else
-    fm->addr = NULL;
 #endif
     return fm;
 }
@@ -66,12 +66,13 @@ void freeFileMap(FileMap *pfm) {
 }
 
 void releaseMmapFileMap(FileMap fm) {
-#ifndef NO_MMAP
-    if (fm->addr) munmap(fm->addr, fm->myEnd - fm->myStart + fm->blockOffset);
-#endif
+#ifdef NO_MMAP
     fm->addr = NULL;
     fm->myStart = 0;
     fm->myEnd = 0;
+#else
+    if (fm->addr) munmap(fm->addr, fm->myEnd - fm->myStart + fm->blockOffset);
+#endif
 }
 
 int closeFileMap(FileMap fm) {
@@ -117,12 +118,17 @@ void setMyPartitionFileMap(FileMap fm, int myPartition, int numPartitions) {
     seekFileMap(fm, fm->myStart);
     size_t offset = fm->myStart % BLOCK_SIZE;
     size_t adviseStart = fm->myStart - offset, adviseLen = fm->myEnd - fm->myStart + offset;
-#ifndef NO_FADVISE
-#ifndef __APPLE__
+#ifdef __APPLE__
+    // There is no fadvise on Mac
+#else
+  #ifndef NO_FADVISE
     posix_fadvise(fileno(fm->fh), adviseStart, adviseLen, POSIX_FADV_SEQUENTIAL);
+  #endif
 #endif
-#endif
-#ifndef NO_MMAP
+
+#ifdef NO_MMAP
+  assert(fm->addr == NULL);
+#else
 #ifndef NO_MADVISE
     if(fm->addr) madvise(fm->addr, adviseLen, MADV_SEQUENTIAL);
 #endif
