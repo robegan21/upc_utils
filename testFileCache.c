@@ -6,7 +6,13 @@
 #include "Buffer.h"
 #include "FileMap.h"
 
+#define USAGE "Usage: testFileCache fileToRead [...]"
 int main (int argc, char **argv) {
+
+  if (argc < 2) {
+    fprintf(stderr, "%s\nPlease include a file to read (in parallel)\n", USAGE);
+    exit(1);
+  }
 
   INIT(argc, argv);
 
