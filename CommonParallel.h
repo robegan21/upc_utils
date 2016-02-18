@@ -154,6 +154,13 @@ static inline void closeMyLog();
 
   #endif
 
+  #ifdef THREADS
+  #error "UPC is incompatible with this flavor of this code"
+  #endif
+  #ifdef MYTHREAD
+  #error "UPC is incompatible with this flavor of this code"
+  #endif
+
   #define THREADS (__get_THREADS())
   #define MYTHREAD (__get_MYTHREAD())
 
