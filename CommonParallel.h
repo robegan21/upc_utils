@@ -25,17 +25,29 @@ extern "C" {
 /* First defined the EXIT_FUNC that will be used */
 #ifdef __UPC__
   /* UPC */
+  #ifdef _OPENMP
+  #error "You can not currently specify OpenMP AND UPC"
+  #endif
+
   #define EXIT_FUNC(code) upc_global_exit(code)
   #define INIT(argc, argv) { /* noop */ }
   #define FINALIZE() { /* noop */ }
 #else
   #ifdef MPI_VERSION
     /* MPI */
+    #ifdef _OPENMP
+    #error "You can not currently specify OpenMP AND MPI"
+    #endif
+
     #define EXIT_FUNC(code) do { MPI_Abort(MPI_COMM_WORLD, code); exit(code); } while (0)
     #define INIT(argc, argv) MPI_Init(&argc, &argv)
     #define FINALIZE() MPI_Finalize()
   #else
     /* OpenMP */
+    #ifndef _OPENMP
+    #error "No parallelism has been chosen at compile time... did you want OpenMP (cc -fopenmp), MPI (mpicc -DUSE_MPI) or UPC (upcc)?"
+    #endif
+
     #define EXIT_FUNC(x) exit(x)
     #define INIT(argc, argv) _Pragma("omp parallel") {
     #define FINALIZE() }
@@ -194,7 +206,7 @@ static inline void closeMyLog();
       return f2;
     #else
       static FILE2 *_mylog = NULL;
-      #pragma omp threadprivate(_mylog)
+      
       #ifdef MPI_VERSION
         if(_mylog == NULL) {
           _mylog = calloc(1, sizeof(FILE2));
@@ -204,6 +216,7 @@ static inline void closeMyLog();
         assert(_mylog->f != NULL);
         return _mylog; 
       #else
+        #pragma omp threadprivate(_mylog)
         if (_mylog == NULL) {
           _mylog = calloc(1, sizeof(FILE2));
           _mylog->f = stderr;
