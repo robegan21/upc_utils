@@ -15,6 +15,8 @@
   #include <omp.h>
 #elif defined USE_MPI
   #include <mpi.h>
+#else
+  #warn "No parallelism has been chosen at compile time... did you want OpenMP (cc -fopenmp), MPI (mpicc -DUSE_MPI) or UPC (upcc)?"
 #endif
 
 #if defined (__cplusplus)
@@ -44,13 +46,14 @@ extern "C" {
     #define FINALIZE() MPI_Finalize()
   #else
     /* OpenMP */
-    #ifndef _OPENMP
-    #error "No parallelism has been chosen at compile time... did you want OpenMP (cc -fopenmp), MPI (mpicc -DUSE_MPI) or UPC (upcc)?"
-    #endif
-
     #define EXIT_FUNC(x) exit(x)
-    #define INIT(argc, argv) _Pragma("omp parallel") {
-    #define FINALIZE() }
+    #ifdef _OPENMP
+      #define INIT(argc, argv) _Pragma("omp parallel") {
+      #define FINALIZE() }
+    #else
+      #define INIT(argc, argv) {
+      #define FINALIZE() }
+    #endif
   #endif
 #endif
 
@@ -108,20 +111,22 @@ static inline void closeMyLog();
 
     #define CHECK_MPI(x) CHECK_ERR(x, MPI_SUCCESS)
     static inline int __get_THREADS() {
-        int size;
-        MPI_Comm_size(MPI_COMM_WORLD, &size);
+        static int size = -1;
+        if (size < 0)
+            MPI_Comm_size(MPI_COMM_WORLD, &size);
         return size;
     }
     static inline int __get_MYTHREAD() {
-        int rank;
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        static int rank = -1;
+        if (rank < 0)
+            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
         return rank;
     }
     #define BARRIER do { LOG(3, "Starting barrier at %d %s\n", __LINE__, __FILE__); CHECK_MPI(MPI_Barrier(MPI_COMM_WORLD)); } while (0)
     #define NOW() MPI_Wtime()
 
   #else
-    // OpenMP or bust!
+    // OpenMP or fake it!
 
     #ifdef _OPENMP
       #include <omp.h>
